@@ -233,10 +233,11 @@ function classifyText(a: string, b: string): {
 
 // ---------- Sheet exclusion ----------
 
-const EXCLUDE_PATTERNS = [/تعريف/, /فهرس/i, /^index$/i, /^def/i, /tableof/i];
-export function shouldExcludeSheet(name: string, rowCount: number): string | null {
-  for (const re of EXCLUDE_PATTERNS) if (re.test(name)) return `Matches auxiliary pattern (${re})`;
-  if (rowCount < 3) return "Fewer than 3 active rows";
+// Every sheet is audited — including تعريف / Def / فهرس / Index — because
+// reviewers have flagged data-entry mistakes inside those auxiliary tabs too.
+// We only skip sheets that are physically empty (no comparable cells).
+export function shouldExcludeSheet(_name: string, rowCount: number): string | null {
+  if (rowCount < 1) return "Sheet is empty";
   return null;
 }
 
