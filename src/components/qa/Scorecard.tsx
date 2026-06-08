@@ -1,6 +1,6 @@
 import { useQA } from "@/lib/qa-store";
 import { motion } from "framer-motion";
-import { TrendingUp, AlertOctagon, Clock, Target, Layers, FileWarning } from "lucide-react";
+import { TrendingUp, AlertOctagon, Clock, Layers, FileWarning } from "lucide-react";
 
 function Stat({ icon: Icon, label, value, sub, tone = "default" }: {
   icon: any; label: string; value: string; sub?: string;
