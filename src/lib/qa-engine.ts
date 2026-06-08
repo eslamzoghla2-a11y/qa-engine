@@ -16,7 +16,7 @@ export type ErrorClass =
   | "Extra Digit"
   | "Digit Transposition"
   | "Digit Substitution"
-  | "Major Numeric Error"
+  | "Numeric Difference"
   | "Text Typo"
   | "Major Text Difference"
   | "Header Mismatch"
@@ -165,41 +165,50 @@ export function similarity(a: string, b: string): number {
 function classifyNumeric(a: string, b: string, cfg: QAConfig): {
   cls: ErrorClass;
   severity: Severity;
+  note?: string;
 } {
   // a = actual (worker), b = expected (reviewer)
+  // Step 1: classify by typing-mistake pattern (digit-only strings)
+  const da = a.replace(/\D/g, "");
+  const db = b.replace(/\D/g, "");
+  let cls: ErrorClass = "Numeric Difference";
+  let severity: Severity = "MEDIUM";
+
+  if (da && db) {
+    if (da.length === db.length - 1 && db.includes(da)) {
+      cls = "Missing Digit";
+    } else if (da.length === db.length + 1 && da.includes(db)) {
+      cls = "Extra Digit";
+    } else if (da.length === db.length) {
+      const diffIdx: number[] = [];
+      for (let i = 0; i < da.length; i++) if (da[i] !== db[i]) diffIdx.push(i);
+      if (
+        diffIdx.length === 2 && diffIdx[1] === diffIdx[0] + 1 &&
+        da[diffIdx[0]] === db[diffIdx[1]] && da[diffIdx[1]] === db[diffIdx[0]]
+      ) {
+        cls = "Digit Transposition";
+      } else if (diffIdx.length === 1) {
+        cls = "Digit Substitution";
+      } else if (diffIdx.length > 1) {
+        cls = "Digit Substitution";
+      }
+    }
+  }
+
+  // Step 2: variance / absolute thresholds only escalate severity
+  let note: string | undefined;
   const an = tryParseNumber(a);
   const bn = tryParseNumber(b);
   if (an !== null && bn !== null) {
     const diff = Math.abs(an - bn);
     const variance = bn !== 0 ? diff / Math.abs(bn) : diff > 0 ? 1 : 0;
     if (variance > cfg.numericMajorVariance || diff > cfg.numericMajorAbsolute) {
-      return { cls: "Major Numeric Error", severity: "HIGH" };
+      severity = "HIGH";
+      note = `Variance exceeds configured threshold (Δ=${diff}, ${(variance * 100).toFixed(1)}%)`;
     }
   }
-  // Digit pattern checks operate on digit-only strings
-  const da = a.replace(/\D/g, "");
-  const db = b.replace(/\D/g, "");
-  if (da && db) {
-    if (da.length === db.length - 1 && db.includes(da)) {
-      return { cls: "Missing Digit", severity: "MEDIUM" };
-    }
-    if (da.length === db.length + 1 && da.includes(db)) {
-      return { cls: "Extra Digit", severity: "MEDIUM" };
-    }
-    if (da.length === db.length) {
-      // transposition: exactly two adjacent swaps
-      let diffIdx: number[] = [];
-      for (let i = 0; i < da.length; i++) if (da[i] !== db[i]) diffIdx.push(i);
-      if (diffIdx.length === 2 && diffIdx[1] === diffIdx[0] + 1 &&
-          da[diffIdx[0]] === db[diffIdx[1]] && da[diffIdx[1]] === db[diffIdx[0]]) {
-        return { cls: "Digit Transposition", severity: "MEDIUM" };
-      }
-      if (diffIdx.length === 1) {
-        return { cls: "Digit Substitution", severity: "MEDIUM" };
-      }
-    }
-  }
-  return { cls: "Major Numeric Error", severity: "HIGH" };
+
+  return { cls, severity, note };
 }
 
 function classifyRange(a: string, b: string): {
