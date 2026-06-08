@@ -7,6 +7,8 @@ export type Severity = "CRITICAL" | "HIGH" | "HEADER" | "MEDIUM" | "LOW";
 export type ErrorClass =
   | "Row Shift"
   | "Column Shift"
+  | "Missing Row"
+  | "Extra Row"
   | "Missing Value"
   | "Extra Value"
   | "Range Inversion"
@@ -299,27 +301,7 @@ function detectShifts(
   gridA: string[][], gridB: string[][], cfg: QAConfig,
 ): Set<string> {
   const shiftCells = new Set<string>();
-  const rows = Math.max(gridA.length, gridB.length);
-  // Detect ROW shifts: compare row r of A vs row r-1, r+1 of B
-  for (let r = 0; r < rows; r++) {
-    const rowA = gridA[r] ?? [];
-    for (const offset of [-1, 1, -2, 2]) {
-      const rowB = gridB[r + offset];
-      if (!rowB) continue;
-      const len = Math.min(rowA.length, rowB.length);
-      if (len < cfg.minimumShiftCells) continue;
-      let matches = 0, compared = 0;
-      for (let c = 0; c < len; c++) {
-        if (isEmpty(rowA[c]) && isEmpty(rowB[c])) continue;
-        compared++;
-        if (normalizeText(rowA[c]) === normalizeText(rowB[c])) matches++;
-      }
-      if (compared >= cfg.minimumShiftCells && matches / compared >= cfg.shiftDetectionThreshold) {
-        for (let c = 0; c < len; c++) shiftCells.add(`${r},${c}`);
-      }
-    }
-  }
-  // Detect COLUMN shifts
+  // Column shifts only — row shifts are now handled by alignRows()
   const cols = Math.max(...gridA.map((r) => r.length), ...gridB.map((r) => r.length), 0);
   for (let c = 0; c < cols; c++) {
     for (const offset of [-1, 1, -2, 2]) {
@@ -342,6 +324,132 @@ function detectShifts(
   return shiftCells;
 }
 
+// ---------- Row alignment recovery ----------
+// Computes a row-by-row alignment between employee (A) and reviewer (B) grids
+// using LCS over normalized row signatures. Inserted/deleted rows are then
+// classified as Missing Row / Extra Row instead of cascading into a Row Shift.
+
+type AlignOp = { a?: number; b?: number };
+
+function rowSignature(row: string[]): string {
+  if (!row || row.length === 0) return "";
+  const parts = row.map((v) => normalizeText(v));
+  if (parts.every((p) => p === "")) return "";
+  return parts.join("\u0001");
+}
+
+function alignRows(
+  gridA: string[][], gridB: string[][], headerRows: number,
+): { ops: AlignOp[]; recovered: boolean; insertedRows: number; deletedRows: number; rowShift: boolean } {
+  const ops: AlignOp[] = [];
+  // Header rows always align 1:1
+  const headerMax = Math.max(headerRows, 0);
+  for (let i = 0; i < headerMax; i++) {
+    ops.push({ a: i < gridA.length ? i : undefined, b: i < gridB.length ? i : undefined });
+  }
+
+  const sigA: string[] = [];
+  const sigB: string[] = [];
+  for (let i = headerMax; i < gridA.length; i++) sigA.push(rowSignature(gridA[i]));
+  for (let i = headerMax; i < gridB.length; i++) sigB.push(rowSignature(gridB[i]));
+
+  const n = sigA.length, m = sigB.length;
+
+  // Fallback for very large sheets — identity alignment, lets old shift detector handle it
+  if (n * m > 2_000_000) {
+    const max = Math.max(n, m);
+    for (let i = 0; i < max; i++) {
+      ops.push({
+        a: i < n ? i + headerMax : undefined,
+        b: i < m ? i + headerMax : undefined,
+      });
+    }
+    return { ops, recovered: false, insertedRows: 0, deletedRows: 0, rowShift: false };
+  }
+
+  // LCS — only non-empty signatures can match (prevents pairing two blank rows)
+  const dp: Uint32Array[] = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (sigA[i - 1] !== "" && sigA[i - 1] === sigB[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = dp[i - 1][j] >= dp[i][j - 1] ? dp[i - 1][j] : dp[i][j - 1];
+      }
+    }
+  }
+
+  // Backtrack
+  const raw: Array<{ kind: "M" | "A" | "B"; a?: number; b?: number }> = [];
+  let i = n, j = m;
+  while (i > 0 && j > 0) {
+    if (sigA[i - 1] !== "" && sigA[i - 1] === sigB[j - 1]) {
+      raw.push({ kind: "M", a: i - 1 + headerMax, b: j - 1 + headerMax });
+      i--; j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      raw.push({ kind: "A", a: i - 1 + headerMax });
+      i--;
+    } else {
+      raw.push({ kind: "B", b: j - 1 + headerMax });
+      j--;
+    }
+  }
+  while (i > 0) { raw.push({ kind: "A", a: --i + headerMax }); }
+  while (j > 0) { raw.push({ kind: "B", b: --j + headerMax }); }
+  raw.reverse();
+
+  // Merge consecutive unmatched A/B runs into modified pairs (per-cell diffable).
+  // Excess overflow becomes Extra Row / Missing Row.
+  const merged: AlignOp[] = [];
+  let k = 0;
+  let insertedRows = 0, deletedRows = 0;
+  while (k < raw.length) {
+    if (raw[k].kind === "M") {
+      merged.push({ a: raw[k].a, b: raw[k].b });
+      k++;
+    } else {
+      const groupAs: number[] = [];
+      const groupBs: number[] = [];
+      while (k < raw.length && raw[k].kind !== "M") {
+        if (raw[k].kind === "A") groupAs.push(raw[k].a!);
+        else groupBs.push(raw[k].b!);
+        k++;
+      }
+      const pairCount = Math.min(groupAs.length, groupBs.length);
+      // Pair by positional order — these are "modified" rows
+      for (let p = 0; p < pairCount; p++) {
+        merged.push({ a: groupAs[p], b: groupBs[p] });
+      }
+      // Excess A → Extra Row (employee inserted), excess B → Missing Row (employee omitted)
+      if (groupAs.length > pairCount) {
+        for (let p = pairCount; p < groupAs.length; p++) {
+          merged.push({ a: groupAs[p] });
+          insertedRows++;
+        }
+      } else if (groupBs.length > pairCount) {
+        for (let p = pairCount; p < groupBs.length; p++) {
+          merged.push({ b: groupBs[p] });
+          deletedRows++;
+        }
+      }
+    }
+  }
+
+  const out = [...ops, ...merged];
+  const totalBody = Math.max(n, m, 1);
+  const unmatched = insertedRows + deletedRows;
+  // If unmatched fraction is small, alignment is reliable.
+  // Otherwise treat as Row Shift (cannot be explained by a few insertions/deletions).
+  const recovered = unmatched / totalBody <= 0.4;
+  return {
+    ops: out,
+    recovered,
+    insertedRows,
+    deletedRows,
+    rowShift: !recovered && unmatched > 0,
+  };
+}
+
 // ---------- Core comparison ----------
 
 export function colLetter(n: number): string {
@@ -360,93 +468,115 @@ export function compareSheet(
 ): SheetReport {
   const headerRows = detectHeaderRows(gridB.length ? gridB : gridA);
   const shiftCells = detectShifts(gridA, gridB, cfg);
-  const rows = Math.max(gridA.length, gridB.length);
   const cols = Math.max(
     ...gridA.map((r) => r.length), ...gridB.map((r) => r.length), 0,
   );
+  const rows = Math.max(gridA.length, gridB.length);
+
+  const alignment = alignRows(gridA, gridB, headerRows);
   let compared = 0;
   const errors: ErrorRecord[] = [];
 
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const rawA = gridA[r]?.[c] ?? "";
-      const rawB = gridB[r]?.[c] ?? "";
-      const ea = isEmpty(rawA), eb = isEmpty(rawB);
-      if (ea && eb) continue;
-      compared++;
-      const isHeader = r < headerRows;
-      const key = `${r},${c}`;
+  // If alignment was NOT recovered, emit a single Row Shift event covering the
+  // misaligned block and fall back to direct row-by-row compare.
+  const useAlignment = alignment.recovered;
 
-      // Priority 1: shift
-      if (shiftCells.has(key)) {
-        // Don't add to error list (shift is reported separately as cell tint)
-        // But represent as a single placeholder record for severity tally:
+  if (useAlignment) {
+    for (const op of alignment.ops) {
+      // Missing Row — present in reviewer, omitted by employee
+      if (op.a === undefined && op.b !== undefined) {
+        const rowB = gridB[op.b] ?? [];
+        const nonEmpty = rowB.filter((v) => !isEmpty(v)).length;
+        if (nonEmpty === 0) continue;
+        compared += nonEmpty;
+        errors.push({
+          sheet: name, row: op.b, col: 0,
+          cellRef: `${colLetter(0)}${op.b + 1}`,
+          expected: rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
+          actual: "(row omitted)",
+          errorClass: "Missing Row",
+          severity: "HIGH",
+          penalty: SEVERITY_PENALTY.HIGH,
+          isHeader: false,
+          note: `Employee skipped a row that exists in the reviewer reference. Subsequent rows realigned automatically.`,
+        });
         continue;
       }
-
-      const a = normalizeText(rawA);
-      const b = normalizeText(rawB);
-      if (a === b) continue;
-
-      // Numeric tolerance check before classifying as defect
-      const an = tryParseNumber(a), bn = tryParseNumber(b);
-      if (an !== null && bn !== null && !strict) {
-        const diff = Math.abs(an - bn);
-        const tol = cfg.numericToleranceMode === "PERCENTAGE"
-          ? Math.abs(bn) * cfg.numericTolerance
-          : cfg.numericTolerance;
-        if (diff <= tol) continue;
+      // Extra Row — employee inserted a row not present in reviewer
+      if (op.b === undefined && op.a !== undefined) {
+        const rowA = gridA[op.a] ?? [];
+        const nonEmpty = rowA.filter((v) => !isEmpty(v)).length;
+        if (nonEmpty === 0) continue;
+        compared += nonEmpty;
+        errors.push({
+          sheet: name, row: op.a, col: 0,
+          cellRef: `${colLetter(0)}${op.a + 1}`,
+          expected: "(no such row)",
+          actual: rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
+          errorClass: "Extra Row",
+          severity: "HIGH",
+          penalty: SEVERITY_PENALTY.HIGH,
+          isHeader: false,
+          note: `Employee added a row not present in the reviewer reference. Subsequent rows realigned automatically.`,
+        });
+        continue;
       }
-
-      let rec: { cls: ErrorClass; severity: Severity; note?: string };
-
-      // Priority 2: missing/extra
-      if (ea && !eb) rec = { cls: "Missing Value", severity: "HIGH" };
-      else if (!ea && eb) rec = { cls: "Extra Value", severity: "HIGH" };
-      else {
-        // Priority 3: range
-        const rangeR = (parseRange(a) || parseRange(b)) ? classifyRange(a, b) : null;
-        if (rangeR) rec = rangeR;
-        else if (an !== null || bn !== null) {
-          // Priority 4: numeric
-          rec = classifyNumeric(a, b, cfg);
-        } else {
-          // Priority 5: text
-          rec = classifyText(a, b);
+      // Both sides present — cell-by-cell compare
+      if (op.a !== undefined && op.b !== undefined) {
+        const rA = op.a, rB = op.b;
+        for (let c = 0; c < cols; c++) {
+          const rawA = gridA[rA]?.[c] ?? "";
+          const rawB = gridB[rB]?.[c] ?? "";
+          const cellErr = classifyCell(name, rA, c, rawA, rawB, rA < headerRows, shiftCells, cfg, strict);
+          if (cellErr === "skip-empty") continue;
+          compared++;
+          if (cellErr === "match" || cellErr === "shift") continue;
+          errors.push(cellErr);
         }
       }
-
-      // Header override
-      if (isHeader) {
-        rec = {
-          cls: "Header Mismatch",
-          severity: "HEADER",
-          note: "Header error — may affect interpretation of entire column",
-        };
+    }
+  } else {
+    // Fall back to direct row-aligned compare (legacy behavior)
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const rawA = gridA[r]?.[c] ?? "";
+        const rawB = gridB[r]?.[c] ?? "";
+        const cellErr = classifyCell(name, r, c, rawA, rawB, r < headerRows, shiftCells, cfg, strict);
+        if (cellErr === "skip-empty") continue;
+        compared++;
+        if (cellErr === "match" || cellErr === "shift") continue;
+        errors.push(cellErr);
       }
-
-      const penalty = isHeader ? cfg.headerPenalty : SEVERITY_PENALTY[rec.severity];
-
+    }
+    // Emit a single Row Shift event to flag the unrecoverable misalignment
+    if (alignment.rowShift) {
       errors.push({
-        sheet: name, row: r, col: c,
-        cellRef: `${colLetter(c)}${r + 1}`,
-        expected: String(rawB), actual: String(rawA),
-        errorClass: rec.cls, severity: rec.severity, penalty,
-        isHeader, note: rec.note,
+        sheet: name, row: headerRows, col: 0,
+        cellRef: `${colLetter(0)}${headerRows + 1}`,
+        expected: `(${alignment.deletedRows} missing, ${alignment.insertedRows} extra)`,
+        actual: "row block shift",
+        errorClass: "Row Shift",
+        severity: "CRITICAL",
+        penalty: SEVERITY_PENALTY.CRITICAL,
+        isHeader: false,
+        note: "Row alignment could not be recovered — block-level structural shift.",
       });
     }
   }
 
-  // Add shift count as CRITICAL aggregate (one error per shifted block — simplified to one per shift cell group)
+  // Column shifts still emit grouped events (cell-level handled via shiftCells)
   if (shiftCells.size > 0) {
-    // Group contiguous shift coords into blocks for cleaner counting
-    const blocks = groupShiftBlocks(shiftCells);
-    for (const blk of blocks) {
+    const byCol = new Map<number, number>();
+    for (const k of shiftCells) {
+      const c = Number(k.split(",")[1]);
+      byCol.set(c, (byCol.get(c) ?? 0) + 1);
+    }
+    for (const [c, size] of byCol) {
       errors.push({
-        sheet: name, row: blk.row, col: blk.col,
-        cellRef: `${colLetter(blk.col)}${blk.row + 1}`,
-        expected: `(${blk.size} cells)`, actual: `${blk.kind} shift block`,
-        errorClass: blk.kind === "row" ? "Row Shift" : "Column Shift",
+        sheet: name, row: 0, col: c,
+        cellRef: `${colLetter(c)}1`,
+        expected: `(${size} cells)`, actual: `column shift block`,
+        errorClass: "Column Shift",
         severity: "CRITICAL",
         penalty: SEVERITY_PENALTY.CRITICAL,
         isHeader: false,
@@ -460,20 +590,53 @@ export function compareSheet(
   };
 }
 
-function groupShiftBlocks(cells: Set<string>): Array<{ row: number; col: number; size: number; kind: "row" | "col" }> {
-  // Simple: group by row, then by col — emit one block per row containing shifts
-  const byRow = new Map<number, number[]>();
-  for (const k of cells) {
-    const [r, c] = k.split(",").map(Number);
-    if (!byRow.has(r)) byRow.set(r, []);
-    byRow.get(r)!.push(c);
+function classifyCell(
+  name: string, r: number, c: number, rawA: string, rawB: string,
+  isHeader: boolean, shiftCells: Set<string>, cfg: QAConfig, strict: boolean,
+): ErrorRecord | "match" | "shift" | "skip-empty" {
+  const ea = isEmpty(rawA), eb = isEmpty(rawB);
+  if (ea && eb) return "skip-empty";
+  const key = `${r},${c}`;
+  if (shiftCells.has(key)) return "shift";
+  const a = normalizeText(rawA);
+  const b = normalizeText(rawB);
+  if (a === b) return "match";
+
+  const an = tryParseNumber(a), bn = tryParseNumber(b);
+  if (an !== null && bn !== null && !strict) {
+    const diff = Math.abs(an - bn);
+    const tol = cfg.numericToleranceMode === "PERCENTAGE"
+      ? Math.abs(bn) * cfg.numericTolerance
+      : cfg.numericTolerance;
+    if (diff <= tol) return "match";
   }
-  const blocks: Array<{ row: number; col: number; size: number; kind: "row" | "col" }> = [];
-  for (const [r, cs] of byRow) {
-    blocks.push({ row: r, col: Math.min(...cs), size: cs.length, kind: "row" });
+
+  let rec: { cls: ErrorClass; severity: Severity; note?: string };
+  if (ea && !eb) rec = { cls: "Missing Value", severity: "HIGH" };
+  else if (!ea && eb) rec = { cls: "Extra Value", severity: "HIGH" };
+  else {
+    const rangeR = (parseRange(a) || parseRange(b)) ? classifyRange(a, b) : null;
+    if (rangeR) rec = rangeR;
+    else if (an !== null || bn !== null) rec = classifyNumeric(a, b, cfg);
+    else rec = classifyText(a, b);
   }
-  // Dedup: at most a few blocks
-  return blocks.slice(0, 50);
+
+  if (isHeader) {
+    rec = {
+      cls: "Header Mismatch",
+      severity: "HEADER",
+      note: "Header error — may affect interpretation of entire column",
+    };
+  }
+
+  const penalty = isHeader ? cfg.headerPenalty : SEVERITY_PENALTY[rec.severity];
+  return {
+    sheet: name, row: r, col: c,
+    cellRef: `${colLetter(c)}${r + 1}`,
+    expected: String(rawB), actual: String(rawA),
+    errorClass: rec.cls, severity: rec.severity, penalty,
+    isHeader, note: rec.note,
+  };
 }
 
 // ---------- Workbook orchestrator ----------
