@@ -77,14 +77,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
+      { title: "QA Engine" },
+      { name: "description", content: "Excel Pro Dashboard generates professional dashboards from Excel sheets, enabling data analysis and visualization." },
       { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { property: "og:title", content: "QA Engine" },
+      { property: "og:description", content: "Excel Pro Dashboard generates professional dashboards from Excel sheets, enabling data analysis and visualization." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
       { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:title", content: "QA Engine" },
+      { name: "twitter:description", content: "Excel Pro Dashboard generates professional dashboards from Excel sheets, enabling data analysis and visualization." },
+      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/985853a9-6b42-4aab-af13-037c1784ddac/id-preview-e002c317--f5cf47bc-5f92-4051-9033-22b9f9d824b4.lovable.app-1780929133749.png" },
+      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/985853a9-6b42-4aab-af13-037c1784ddac/id-preview-e002c317--f5cf47bc-5f92-4051-9033-22b9f9d824b4.lovable.app-1780929133749.png" },
     ],
     links: [
       {
