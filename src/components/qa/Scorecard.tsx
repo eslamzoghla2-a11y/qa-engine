@@ -33,7 +33,7 @@ const GRADE_TONE: Record<string, "good" | "warn" | "bad" | "default"> = {
 };
 
 export function Scorecard() {
-  const { report } = useQA();
+  const { report, employeeName } = useQA();
   if (!report) return null;
   const t = report.totals;
   const grade = report.grade;
@@ -44,6 +44,12 @@ export function Scorecard() {
       <div className="rounded-2xl bg-gradient-to-br from-primary/10 via-surface to-surface border border-border p-6 shadow-sm">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
+            {employeeName && (
+              <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-medium">Employee</div>
+            )}
+            {employeeName && (
+              <div className="text-lg font-semibold text-foreground mb-2">{employeeName}</div>
+            )}
             <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-medium">Performance Grade</div>
             <div className={`text-4xl font-bold tracking-tight mt-1 ${
               tone === "good" ? "text-success" : tone === "warn" ? "text-medium" : tone === "bad" ? "text-critical" : ""
@@ -54,9 +60,9 @@ export function Scorecard() {
             </div>
           </div>
           <div className="flex items-baseline gap-2">
-            <div className="text-5xl font-bold tabular-nums tracking-tight">{t.weightedAccuracy.toFixed(2)}</div>
+            <div className="text-5xl font-bold tabular-nums tracking-tight">{t.baseAccuracy.toFixed(2)}</div>
             <div className="text-lg text-muted-foreground">%</div>
-            <div className="ml-2 text-xs text-muted-foreground">weighted accuracy</div>
+            <div className="ml-2 text-xs text-muted-foreground">accuracy</div>
           </div>
         </div>
         {grade.rationale.length > 1 && (
@@ -70,8 +76,7 @@ export function Scorecard() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <Stat icon={Target} label="Base Accuracy" value={`${t.baseAccuracy.toFixed(2)}%`} />
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
         <Stat icon={Layers} label="Compared Cells" value={t.comparedCells.toLocaleString()} />
         <Stat icon={FileWarning} label="Total Errors" value={t.totalErrors.toLocaleString()}
               tone={t.totalErrors > 0 ? "warn" : "good"} />
