@@ -404,16 +404,39 @@ function alignRows(
   while (j > 0) { raw.push({ kind: "B", b: --j + headerMax }); }
   raw.reverse();
 
-  // Structural rule: never positionally pair unmatched A/B as "modified" rows —
-  // each leftover becomes Missing Row (B) or Extra Row (A). The structural
-  // error alone explains the discrepancy; downstream cell comparisons for
-  // those rows are suppressed.
+  // Merge consecutive unmatched A/B runs into modified pairs (per-cell diffable).
+  // Excess overflow becomes Extra Row / Missing Row (structural — suppressed).
   const merged: AlignOp[] = [];
+  let k = 0;
   let insertedRows = 0, deletedRows = 0;
-  for (const r of raw) {
-    if (r.kind === "M") merged.push({ a: r.a, b: r.b });
-    else if (r.kind === "A") { merged.push({ a: r.a }); insertedRows++; }
-    else { merged.push({ b: r.b }); deletedRows++; }
+  while (k < raw.length) {
+    if (raw[k].kind === "M") {
+      merged.push({ a: raw[k].a, b: raw[k].b });
+      k++;
+    } else {
+      const groupAs: number[] = [];
+      const groupBs: number[] = [];
+      while (k < raw.length && raw[k].kind !== "M") {
+        if (raw[k].kind === "A") groupAs.push(raw[k].a!);
+        else groupBs.push(raw[k].b!);
+        k++;
+      }
+      const pairCount = Math.min(groupAs.length, groupBs.length);
+      for (let p = 0; p < pairCount; p++) {
+        merged.push({ a: groupAs[p], b: groupBs[p] });
+      }
+      if (groupAs.length > pairCount) {
+        for (let p = pairCount; p < groupAs.length; p++) {
+          merged.push({ a: groupAs[p] });
+          insertedRows++;
+        }
+      } else if (groupBs.length > pairCount) {
+        for (let p = pairCount; p < groupBs.length; p++) {
+          merged.push({ b: groupBs[p] });
+          deletedRows++;
+        }
+      }
+    }
   }
 
   const out = [...ops, ...merged];
