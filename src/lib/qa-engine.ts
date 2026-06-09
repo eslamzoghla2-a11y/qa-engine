@@ -733,10 +733,10 @@ export function compareSheet(
         expected: rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
         actual: "(row omitted)",
         errorClass: "Missing Row",
-        severity: "HIGH",
-        penalty: SEVERITY_PENALTY.HIGH,
+        severity: "CRITICAL",
+        penalty: SEVERITY_PENALTY.CRITICAL,
         isHeader: false,
-        note: "Employee skipped a row that exists in the reviewer reference. Subsequent rows realigned automatically.",
+        note: "Structural defect — entire row omitted. Downstream cell comparisons suppressed for this row.",
       });
       continue;
     }
@@ -751,10 +751,10 @@ export function compareSheet(
         expected: "(no such row)",
         actual: rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
         errorClass: "Extra Row",
-        severity: "HIGH",
-        penalty: SEVERITY_PENALTY.HIGH,
+        severity: "CRITICAL",
+        penalty: SEVERITY_PENALTY.CRITICAL,
         isHeader: false,
-        note: "Employee added a row not present in the reviewer reference. Subsequent rows realigned automatically.",
+        note: "Structural defect — extra row inserted. Downstream cell comparisons suppressed for this row.",
       });
       continue;
     }
