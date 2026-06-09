@@ -641,6 +641,7 @@ export function compareSheet(
     : Array.from({ length: cols }, (_, c) => ({ a: c, b: c }));
   const recoveredCols = new Set<number>();
   if (useColAlign) for (const op of colAlign.ops) if (op.a !== undefined && op.b !== undefined) recoveredCols.add(op.a);
+  void recoveredCols;
 
   // Step 3: Shift detection (only as last resort, and skip columns recovered by alignment)
   const shiftCells = useColAlign ? new Set<string>() : detectShifts(gridA, gridB, cfg);
