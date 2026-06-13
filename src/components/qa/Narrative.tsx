@@ -78,7 +78,7 @@ export function Patterns() {
   const { report } = useQA();
   if (!report) return null;
   const p = report.patterns;
-  const empty = !p.copyPaste.length && !p.clusters.length && !p.digitSwaps.length;
+  const empty = !p.copyPaste.length && !p.clusters.length && !p.digitSwaps.length && !p.sheetConcentration?.length;
   if (empty) return null;
   return (
     <div className="rounded-2xl bg-surface border border-border p-6 shadow-sm">
@@ -86,7 +86,7 @@ export function Patterns() {
         <Repeat className="h-4 w-4 text-primary" />
         <h3 className="text-sm font-semibold">Systematic Patterns</h3>
       </div>
-      <div className="grid md:grid-cols-3 gap-4">
+      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
         <PatternBlock icon={Copy} label="Copy-Paste Errors" items={p.copyPaste.map((c) => ({
           primary: `"${c.value}"`, secondary: `${c.count}×`,
         }))} />
@@ -95,6 +95,9 @@ export function Patterns() {
         }))} />
         <PatternBlock icon={Repeat} label="Digit Swap Trends" items={p.digitSwaps.map((s) => ({
           primary: `${s.from} → ${s.to}`, secondary: `${s.count}×`,
+        }))} />
+        <PatternBlock icon={Zap} label="Sheet Concentration" items={(p.sheetConcentration ?? []).map((s) => ({
+          primary: s.sheet, secondary: `${s.pct}% (${s.errorCount})`,
         }))} />
       </div>
     </div>
