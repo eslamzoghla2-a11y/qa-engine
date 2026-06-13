@@ -1,0 +1,639 @@
+diff -ru qa-engine/src/components/qa/ErrorTable.tsx qa-engine-enhanced/src/components/qa/ErrorTable.tsx
+--- qa-engine/src/components/qa/ErrorTable.tsx	2026-06-13 20:29:57.845887126 +0000
++++ qa-engine-enhanced/src/components/qa/ErrorTable.tsx	2026-06-13 20:41:18.793927977 +0000
+@@ -1,8 +1,9 @@
+ import { useQA } from "@/lib/qa-store";
+ import { useMemo, useState } from "react";
+ import { Input } from "@/components/ui/input";
+-import { Search, Download } from "lucide-react";
++import { Search, Download, ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
+ import { Button } from "@/components/ui/button";
++import type { ErrorRecord } from "@/lib/qa-engine";
+ 
+ const SEV_BADGE: Record<string, string> = {
+   CRITICAL: "bg-critical text-white",
+@@ -12,15 +13,52 @@
+   LOW: "bg-low text-black",
+ };
+ 
++const SEV_ORDER: Record<string, number> = { CRITICAL: 0, HIGH: 1, HEADER: 2, MEDIUM: 3, LOW: 4 };
++
++type SortKey = "sheet" | "cellRef" | "severity" | "errorClass" | "similarityPct" | "penalty";
++type SortDir = "asc" | "desc";
++
++function DiffHighlight({ expected, actual }: { expected: string; actual: string }) {
++  // Character-level diff highlight for short strings
++  if (!expected || !actual || expected.length > 80 || actual.length > 80) {
++    return <span className="text-critical font-mono">{actual || "∅"}</span>;
++  }
++  const maxLen = Math.max(expected.length, actual.length);
++  const chars = Array.from({ length: maxLen }, (_, i) => ({
++    ch: actual[i] ?? "",
++    diff: actual[i] !== expected[i],
++  }));
++  return (
++    <span className="font-mono">
++      {chars.map((c, i) =>
++        c.diff
++          ? <mark key={i} className="bg-critical/25 text-critical rounded-sm px-px">{c.ch || "∅"}</mark>
++          : <span key={i}>{c.ch}</span>
++      )}
++    </span>
++  );
++}
++
+ export function ErrorTable() {
+   const { report } = useQA();
+   const [q, setQ] = useState("");
+   const [sev, setSev] = useState<string>("ALL");
++  const [errType, setErrType] = useState<string>("ALL");
++  const [sortKey, setSortKey] = useState<SortKey>("severity");
++  const [sortDir, setSortDir] = useState<SortDir>("asc");
++  const [showNorm, setShowNorm] = useState(false);
+ 
+   const all = useMemo(() => report?.sheets.flatMap((s) => s.errors) ?? [], [report]);
++
++  const errorTypes = useMemo(() => {
++    const types = new Set(all.map((e) => e.errorClass));
++    return Array.from(types).sort();
++  }, [all]);
++
+   const filtered = useMemo(() => {
+-    return all.filter((e) => {
++    let rows = all.filter((e) => {
+       if (sev !== "ALL" && e.severity !== sev) return false;
++      if (errType !== "ALL" && e.errorClass !== errType) return false;
+       if (q) {
+         const t = q.toLowerCase();
+         return e.sheet.toLowerCase().includes(t) || e.cellRef.toLowerCase().includes(t)
+@@ -29,32 +67,68 @@
+       }
+       return true;
+     });
+-  }, [all, q, sev]);
++
++    rows = [...rows].sort((a, b) => {
++      let cmp = 0;
++      if (sortKey === "severity") cmp = (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9);
++      else if (sortKey === "penalty") cmp = a.penalty - b.penalty;
++      else if (sortKey === "similarityPct") cmp = (a.similarityPct ?? 100) - (b.similarityPct ?? 100);
++      else cmp = String(a[sortKey]).localeCompare(String(b[sortKey]));
++      return sortDir === "asc" ? cmp : -cmp;
++    });
++
++    return rows;
++  }, [all, q, sev, errType, sortKey, sortDir]);
+ 
+   if (!report) return null;
+ 
++  function toggleSort(key: SortKey) {
++    if (sortKey === key) setSortDir((d) => d === "asc" ? "desc" : "asc");
++    else { setSortKey(key); setSortDir("asc"); }
++  }
++
++  function SortIcon({ k }: { k: SortKey }) {
++    if (sortKey !== k) return <ChevronsUpDown className="h-3 w-3 opacity-30" />;
++    return sortDir === "asc"
++      ? <ChevronUp className="h-3 w-3 text-primary" />
++      : <ChevronDown className="h-3 w-3 text-primary" />;
++  }
++
+   function downloadCSV() {
+-    const headers = ["Sheet", "Cell", "Row", "Col", "Severity", "Class", "Penalty", "Expected", "Actual", "IsHeader"];
+-    const rows = filtered.map((e) => [
+-      e.sheet, e.cellRef, e.row + 1, e.col + 1, e.severity, e.errorClass, e.penalty,
+-      JSON.stringify(e.expected), JSON.stringify(e.actual), e.isHeader ? "Y" : "",
++    // spec: Detailed Error Log fields
++    const headers = [
++      "Sheet", "Cell", "Employee Value", "Reviewer Value",
++      "Normalized Employee", "Normalized Reviewer",
++      "Similarity %", "Error Type", "Severity", "Penalty", "Notes",
++    ];
++    const rows = all.map((e: ErrorRecord) => [
++      e.sheet, e.cellRef,
++      JSON.stringify(e.actual), JSON.stringify(e.expected),
++      JSON.stringify(e.normalizedActual ?? ""), JSON.stringify(e.normalizedExpected ?? ""),
++      e.similarityPct ?? "",
++      e.errorClass, e.severity, e.penalty,
++      JSON.stringify(e.note ?? ""),
+     ].join(","));
+     const csv = [headers.join(","), ...rows].join("\n");
+-    const blob = new Blob([csv], { type: "text/csv" });
++    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+     const a = document.createElement("a");
+     a.href = URL.createObjectURL(blob);
+     a.download = `qa-defects-${Date.now()}.csv`; a.click();
+   }
+ 
++  const TRUNCATE = 50;
++  const displayed = filtered.slice(0, 500);
++  const truncated = all.length > TRUNCATE && filtered.length > TRUNCATE;
++
+   return (
+     <div className="rounded-2xl bg-surface border border-border shadow-sm overflow-hidden">
+       <div className="flex flex-wrap items-center gap-2 p-4 border-b border-border">
+         <h3 className="text-sm font-semibold">Defect Ledger</h3>
+         <span className="text-xs text-muted-foreground">{filtered.length} of {all.length}</span>
+-        <div className="ml-auto flex items-center gap-2">
++        <div className="ml-auto flex flex-wrap items-center gap-2">
+           <div className="relative">
+             <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+-            <Input className="pl-7 h-8 w-56 text-xs" placeholder="Search cell, value, sheet…"
++            <Input className="pl-7 h-8 w-44 text-xs" placeholder="Search…"
+               value={q} onChange={(e) => setQ(e.target.value)} />
+           </div>
+           <select value={sev} onChange={(e) => setSev(e.target.value)}
+@@ -63,42 +137,79 @@
+             <option>CRITICAL</option><option>HIGH</option><option>HEADER</option>
+             <option>MEDIUM</option><option>LOW</option>
+           </select>
++          <select value={errType} onChange={(e) => setErrType(e.target.value)}
++            className="h-8 px-2 rounded-md border border-border bg-surface text-xs max-w-[160px]">
++            <option value="ALL">All types</option>
++            {errorTypes.map((t) => <option key={t}>{t}</option>)}
++          </select>
++          <Button size="sm" variant="outline" className="h-8 text-xs"
++            onClick={() => setShowNorm((v) => !v)}>
++            {showNorm ? "Hide" : "Show"} Normalized
++          </Button>
+           <Button size="sm" variant="outline" onClick={downloadCSV} className="h-8">
+             <Download className="h-3.5 w-3.5 mr-1" /> CSV
+           </Button>
+         </div>
+       </div>
+-      <div className="overflow-auto max-h-96">
++
++      {truncated && (
++        <div className="px-4 py-2 bg-medium/10 border-b border-medium/20 text-xs text-medium">
++          [Truncated: showing first {TRUNCATE} of {filtered.length} errors — export CSV for full list. Metrics use all {all.length} errors.]
++        </div>
++      )}
++
++      <div className="overflow-auto max-h-[480px]">
+         <table className="w-full text-xs">
+-          <thead className="bg-surface-2 sticky top-0">
++          <thead className="bg-surface-2 sticky top-0 z-10">
+             <tr className="text-left">
+-              <Th>Sheet</Th><Th>Cell</Th><Th>Severity</Th><Th>Class</Th>
+-              <Th>Expected</Th><Th>Actual</Th><Th className="text-right">Pen</Th>
++              <Th sortable onClick={() => toggleSort("sheet")}>Sheet <SortIcon k="sheet" /></Th>
++              <Th sortable onClick={() => toggleSort("cellRef")}>Cell <SortIcon k="cellRef" /></Th>
++              <Th sortable onClick={() => toggleSort("severity")}>Severity <SortIcon k="severity" /></Th>
++              <Th sortable onClick={() => toggleSort("errorClass")}>Type <SortIcon k="errorClass" /></Th>
++              <Th>Reviewer (Expected)</Th>
++              <Th>Employee (Actual)</Th>
++              {showNorm && <><Th>Norm. Expected</Th><Th>Norm. Actual</Th></>}
++              <Th sortable onClick={() => toggleSort("similarityPct")}>Sim% <SortIcon k="similarityPct" /></Th>
++              <Th sortable onClick={() => toggleSort("penalty")} className="text-right">Pen <SortIcon k="penalty" /></Th>
+             </tr>
+           </thead>
+           <tbody>
+-            {filtered.slice(0, 500).map((e, i) => (
++            {displayed.map((e, i) => (
+               <tr key={i} className="border-t border-border hover:bg-surface-2/60">
+-                <Td className="font-medium">{e.sheet}</Td>
++                <Td className="font-medium max-w-[120px] truncate" title={e.sheet}>{e.sheet}</Td>
+                 <Td className="font-mono text-muted-foreground">{e.cellRef}</Td>
+                 <Td>
+                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${SEV_BADGE[e.severity]}`}>
+                     {e.severity}
+                   </span>
+                 </Td>
+-                <Td>{e.errorClass}</Td>
+-                <Td className="font-mono max-w-[200px] truncate" title={e.expected}>{e.expected || "∅"}</Td>
+-                <Td className="font-mono max-w-[200px] truncate text-critical" title={e.actual}>{e.actual || "∅"}</Td>
++                <Td className="max-w-[140px] truncate" title={e.errorClass}>{e.errorClass}</Td>
++                <Td className="font-mono max-w-[180px] truncate text-muted-foreground" title={e.expected}>
++                  {e.expected || "∅"}
++                </Td>
++                <Td className="max-w-[180px] truncate" title={e.actual}>
++                  <DiffHighlight expected={e.expected} actual={e.actual} />
++                </Td>
++                {showNorm && (
++                  <>
++                    <Td className="font-mono max-w-[140px] truncate text-muted-foreground" title={e.normalizedExpected}>
++                      {e.normalizedExpected || "∅"}
++                    </Td>
++                    <Td className="font-mono max-w-[140px] truncate text-muted-foreground" title={e.normalizedActual}>
++                      {e.normalizedActual || "∅"}
++                    </Td>
++                  </>
++                )}
++                <Td className="tabular-nums text-center">
++                  <span className={`text-[11px] font-semibold ${
++                    (e.similarityPct ?? 100) >= 80 ? "text-medium" : "text-critical"
++                  }`}>{e.similarityPct ?? "—"}%</span>
++                </Td>
+                 <Td className="text-right tabular-nums font-semibold">{e.penalty}</Td>
+               </tr>
+             ))}
+           </tbody>
+         </table>
+-        {filtered.length > 500 && (
+-          <div className="p-2 text-center text-xs text-muted-foreground border-t border-border bg-surface-2">
+-            Showing first 500 of {filtered.length} — export CSV for full list.
+-          </div>
+-        )}
+         {filtered.length === 0 && (
+           <div className="p-6 text-center text-sm text-muted-foreground">No defects match the current filter.</div>
+         )}
+@@ -107,8 +218,19 @@
+   );
+ }
+ 
+-function Th({ children, className = "" }: { children: any; className?: string }) {
+-  return <th className={`px-3 py-2 font-medium text-muted-foreground ${className}`}>{children}</th>;
++function Th({ children, className = "", sortable, onClick }: {
++  children: any; className?: string; sortable?: boolean; onClick?: () => void;
++}) {
++  return (
++    <th
++      className={`px-3 py-2 font-medium text-muted-foreground whitespace-nowrap ${
++        sortable ? "cursor-pointer select-none hover:text-foreground" : ""
++      } ${className}`}
++      onClick={onClick}
++    >
++      <span className="inline-flex items-center gap-1">{children}</span>
++    </th>
++  );
+ }
+ function Td({ children, className = "", title }: { children: any; className?: string; title?: string }) {
+   return <td className={`px-3 py-2 ${className}`} title={title}>{children}</td>;
+diff -ru qa-engine/src/components/qa/Narrative.tsx qa-engine-enhanced/src/components/qa/Narrative.tsx
+--- qa-engine/src/components/qa/Narrative.tsx	2026-06-13 20:29:57.845887126 +0000
++++ qa-engine-enhanced/src/components/qa/Narrative.tsx	2026-06-13 20:41:34.497663454 +0000
+@@ -78,7 +78,7 @@
+   const { report } = useQA();
+   if (!report) return null;
+   const p = report.patterns;
+-  const empty = !p.copyPaste.length && !p.clusters.length && !p.digitSwaps.length;
++  const empty = !p.copyPaste.length && !p.clusters.length && !p.digitSwaps.length && !p.sheetConcentration?.length;
+   if (empty) return null;
+   return (
+     <div className="rounded-2xl bg-surface border border-border p-6 shadow-sm">
+@@ -86,7 +86,7 @@
+         <Repeat className="h-4 w-4 text-primary" />
+         <h3 className="text-sm font-semibold">Systematic Patterns</h3>
+       </div>
+-      <div className="grid md:grid-cols-3 gap-4">
++      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+         <PatternBlock icon={Copy} label="Copy-Paste Errors" items={p.copyPaste.map((c) => ({
+           primary: `"${c.value}"`, secondary: `${c.count}×`,
+         }))} />
+@@ -96,6 +96,9 @@
+         <PatternBlock icon={Repeat} label="Digit Swap Trends" items={p.digitSwaps.map((s) => ({
+           primary: `${s.from} → ${s.to}`, secondary: `${s.count}×`,
+         }))} />
++        <PatternBlock icon={Zap} label="Sheet Concentration" items={(p.sheetConcentration ?? []).map((s) => ({
++          primary: s.sheet, secondary: `${s.pct}% (${s.errorCount})`,
++        }))} />
+       </div>
+     </div>
+   );
+diff -ru qa-engine/src/components/qa/SheetTabs.tsx qa-engine-enhanced/src/components/qa/SheetTabs.tsx
+--- qa-engine/src/components/qa/SheetTabs.tsx	2026-06-13 20:29:57.845887126 +0000
++++ qa-engine-enhanced/src/components/qa/SheetTabs.tsx	2026-06-13 20:42:18.688072114 +0000
+@@ -75,6 +75,29 @@
+     return m;
+   }, [sheet]);
+ 
++  // Grid Inspector metrics (spec)
++  const metrics = useMemo(() => {
++    const structural = ["Missing Row","Extra Row","Missing Column","Extra Column","Missing Cell","Extra Cell","Local Row Misalignment","Local Column Misalignment"];
++    const shiftTypes = ["Row Shift","Column Shift"];
++    const rangeTypes = ["Range Inversion","Range Boundary","Range Representation"];
++    const numericTypes = ["Missing Digit","Extra Digit","Digit Substitution","Digit Transposition","Numeric Difference"];
++    const textTypes = ["Text Typo","Major Text Difference","Minor Variation"];
++    const headerTypes = ["Header Mismatch"];
++    let structuralCount = 0, shiftCount = 0, rangeCount = 0, numericCount = 0, textCount = 0, headerCount = 0;
++    for (const e of sheet.errors) {
++      if (structural.includes(e.errorClass)) structuralCount++;
++      else if (shiftTypes.includes(e.errorClass)) shiftCount++;
++      else if (rangeTypes.includes(e.errorClass)) rangeCount++;
++      else if (numericTypes.includes(e.errorClass)) numericCount++;
++      else if (textTypes.includes(e.errorClass)) textCount++;
++      else if (headerTypes.includes(e.errorClass)) headerCount++;
++    }
++    const accuracy = sheet.comparedCells
++      ? ((sheet.comparedCells - sheet.errors.length) / sheet.comparedCells * 100).toFixed(1)
++      : "100.0";
++    return { structuralCount, shiftCount, rangeCount, numericCount, textCount, headerCount, accuracy };
++  }, [sheet]);
++
+   const totalRows = Math.max(sheet.gridA.length, sheet.gridB.length);
+   const totalCols = sheet.colCount;
+   const rows = Math.min(totalRows, MAX_ROWS);
+@@ -89,7 +112,7 @@
+           <div className="font-semibold text-sm">{sheet.name}</div>
+           <span className="text-muted-foreground">·</span>
+           <span className="text-muted-foreground tabular-nums">
+-            {sheet.comparedCells.toLocaleString()} cells · {sheet.errors.length} defects · {sheet.shiftCells.size} shift cells
++            {sheet.comparedCells.toLocaleString()} cells · {sheet.errors.length} defects · {metrics.accuracy}% accuracy
+           </span>
+         </div>
+         <div className="flex items-center gap-2">
+@@ -106,6 +129,24 @@
+           <Legend />
+         </div>
+       </div>
++
++      {/* Grid Inspector breakdown (spec) */}
++      <div className="grid grid-cols-3 md:grid-cols-6 gap-px bg-border border-b border-border text-[10px]">
++        {[
++          { label: "Structural", value: metrics.structuralCount, tone: metrics.structuralCount > 0 ? "text-critical" : "text-muted-foreground" },
++          { label: "Shift", value: metrics.shiftCount, tone: metrics.shiftCount > 0 ? "text-critical" : "text-muted-foreground" },
++          { label: "Range", value: metrics.rangeCount, tone: metrics.rangeCount > 0 ? "text-high" : "text-muted-foreground" },
++          { label: "Numeric", value: metrics.numericCount, tone: metrics.numericCount > 0 ? "text-medium" : "text-muted-foreground" },
++          { label: "Text", value: metrics.textCount, tone: metrics.textCount > 0 ? "text-medium" : "text-muted-foreground" },
++          { label: "Header", value: metrics.headerCount, tone: metrics.headerCount > 0 ? "text-info" : "text-muted-foreground" },
++        ].map((m) => (
++          <div key={m.label} className="bg-surface-2 px-3 py-2 flex items-center justify-between">
++            <span className="text-muted-foreground uppercase tracking-wider font-medium">{m.label}</span>
++            <span className={`font-semibold tabular-nums ${m.tone}`}>{m.value}</span>
++          </div>
++        ))}
++      </div>
++
+       {cropped && (
+         <div className="flex items-center gap-2 px-4 py-2 bg-medium/10 border-b border-medium/20 text-xs text-medium">
+           <Eye className="h-3.5 w-3.5" />
+@@ -169,6 +210,13 @@
+           <div className="space-y-0.5 font-mono">
+             <div><span className="text-muted-foreground">Expected:</span> {err.expected || "∅"}</div>
+             <div><span className="text-muted-foreground">Actual:</span> {err.actual || "∅"}</div>
++            {err.normalizedExpected !== err.expected && (
++              <div><span className="text-muted-foreground">Norm. Expected:</span> {err.normalizedExpected || "∅"}</div>
++            )}
++            {err.normalizedActual !== err.actual && (
++              <div><span className="text-muted-foreground">Norm. Actual:</span> {err.normalizedActual || "∅"}</div>
++            )}
++            <div><span className="text-muted-foreground">Similarity:</span> {err.similarityPct ?? "—"}%</div>
+             <div><span className="text-muted-foreground">Penalty:</span> {err.penalty}</div>
+           </div>
+           {err.note && <div className="text-medium mt-1.5">{err.note}</div>}
+diff -ru qa-engine/src/components/qa/UploadCard.tsx qa-engine-enhanced/src/components/qa/UploadCard.tsx
+--- qa-engine/src/components/qa/UploadCard.tsx	2026-06-13 20:29:57.845887126 +0000
++++ qa-engine-enhanced/src/components/qa/UploadCard.tsx	2026-06-13 20:42:40.992647215 +0000
+@@ -68,6 +68,7 @@
+   const [fileA, setFileA] = useState<File | null>(null);
+   const [fileB, setFileB] = useState<File | null>(null);
+   const [running, setRunning] = useState(false);
++  const [progress, setProgress] = useState<string | null>(null);
+ 
+   async function run() {
+     if (!fileA || !fileB) {
+@@ -75,11 +76,14 @@
+       return;
+     }
+     setRunning(true);
++    setProgress("Reading files…");
+     try {
+       const [bufA, bufB] = await Promise.all([fileA.arrayBuffer(), fileB.arrayBuffer()]);
++      setProgress("Parsing workbooks…");
++      await new Promise((r) => setTimeout(r, 10));
+       const wbA = loadWorkbook(bufA);
+       const wbB = loadWorkbook(bufB);
+-      // Yield to keep UI responsive
++      setProgress(`Comparing ${wbA.SheetNames.length} sheet(s)…`);
+       await new Promise((r) => setTimeout(r, 20));
+       const report = compareWorkbooks(
+         { name: fileA.name, wb: wbA },
+@@ -94,6 +98,7 @@
+       toast.error("Failed to parse workbook. Ensure both are valid Excel files.");
+     } finally {
+       setRunning(false);
++      setProgress(null);
+     }
+   }
+ 
+@@ -122,9 +127,18 @@
+               file={fileB} onPick={setFileB} />
+       </div>
+       <Button onClick={run} disabled={running || !fileA || !fileB} className="w-full mt-5">
+-        {running ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Evaluating…</>
+-                 : <><Sparkles className="h-4 w-4 mr-2" /> Run Quality Assurance</>}
++        {running
++          ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />{progress ?? "Evaluating…"}</>
++          : <><Sparkles className="h-4 w-4 mr-2" /> Run Quality Assurance</>}
+       </Button>
++      {running && (
++        <div className="mt-3">
++          <div className="h-1 w-full bg-border rounded-full overflow-hidden">
++            <div className="h-1 bg-primary rounded-full animate-pulse w-1/2" />
++          </div>
++          <p className="text-[11px] text-muted-foreground mt-1.5 text-center">{progress}</p>
++        </div>
++      )}
+     </div>
+   );
+ }
+diff -ru qa-engine/src/lib/qa-engine.ts qa-engine-enhanced/src/lib/qa-engine.ts
+--- qa-engine/src/lib/qa-engine.ts	2026-06-13 20:29:57.853008922 +0000
++++ qa-engine-enhanced/src/lib/qa-engine.ts	2026-06-13 20:40:36.132365613 +0000
+@@ -37,6 +37,9 @@
+   cellRef: string;
+   expected: string;
+   actual: string;
++  normalizedExpected: string;   // spec: Normalized Reviewer
++  normalizedActual: string;     // spec: Normalized Employee
++  similarityPct: number;        // spec: Similarity %
+   errorClass: ErrorClass;
+   severity: Severity;
+   penalty: number;
+@@ -72,7 +75,7 @@
+   numericMajorVariance: 0.2,
+   numericMajorAbsolute: 100,
+   numericTolerance: 0.01,
+-  numericToleranceMode: "PERCENTAGE",
++  numericToleranceMode: "ABSOLUTE",   // spec: ToleranceMode = ABSOLUTE
+   minimumShiftCells: 20,
+   shiftDetectionThreshold: 0.8,
+   headerPenalty: 3,
+@@ -94,12 +97,12 @@
+ const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+ 
+ export function normalizeArabic(s: string): string {
++  // NOTE: ة → ه is intentionally NOT normalized per spec (Literal Accuracy rule)
+   return s
+     .replace(/[أإآ]/g, "ا")
+     .replace(/ى/g, "ي")
+     .replace(/ؤ/g, "و")
+     .replace(/ئ/g, "ي")
+-    .replace(/ة/g, "ه")
+     .replace(ARABIC_DIACRITICS, "");
+ }
+ 
+@@ -622,14 +625,21 @@
+   const errors: ErrorRecord[] = [];
+ 
+   // Emit Missing Column / Extra Column events (once per column)
++  // Track suppressed employee columns so we don't emit cell errors inside them.
++  const suppressedACols = new Set<number>(); // extra cols in employee
++  const suppressedBCols = new Set<number>(); // missing cols (not in employee)
+   if (useColAlign) {
+     for (const op of colAlign.ops) {
+       if (op.a === undefined && op.b !== undefined) {
++        suppressedBCols.add(op.b);
+         errors.push({
+           sheet: name, row: 0, col: op.b,
+           cellRef: `${colLetter(op.b)}1`,
+           expected: `(column ${colLetter(op.b)})`,
+           actual: "(column omitted)",
++          normalizedExpected: `(column ${colLetter(op.b)})`,
++          normalizedActual: "",
++          similarityPct: 0,
+           errorClass: "Missing Column",
+           severity: "CRITICAL",
+           penalty: SEVERITY_PENALTY.CRITICAL,
+@@ -637,11 +647,15 @@
+           note: "Structural defect — entire column omitted. Downstream cell comparisons suppressed for this column.",
+         });
+       } else if (op.b === undefined && op.a !== undefined) {
++        suppressedACols.add(op.a);
+         errors.push({
+           sheet: name, row: 0, col: op.a,
+           cellRef: `${colLetter(op.a)}1`,
+           expected: "(no such column)",
+           actual: `(column ${colLetter(op.a)})`,
++          normalizedExpected: "",
++          normalizedActual: `(column ${colLetter(op.a)})`,
++          similarityPct: 0,
+           errorClass: "Extra Column",
+           severity: "CRITICAL",
+           penalty: SEVERITY_PENALTY.CRITICAL,
+@@ -667,11 +681,15 @@
+         const cls: ErrorClass = local.kind === "missing" ? "Missing Cell"
+                               : local.kind === "extra" ? "Extra Cell"
+                               : "Local Row Misalignment";
++        const expStr = rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 160);
++        const actStr = rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 160);
+         errors.push({
+           sheet: name, row: rA, col: 0,
+           cellRef: `${colLetter(0)}${rA + 1}`,
+-          expected: rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 160),
+-          actual: rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 160),
++          expected: expStr, actual: actStr,
++          normalizedExpected: normalizeText(expStr),
++          normalizedActual: normalizeText(actStr),
++          similarityPct: Math.round(similarity(normalizeText(actStr), normalizeText(expStr)) * 100),
+           errorClass: cls,
+           severity: "MEDIUM",
+           penalty: SEVERITY_PENALTY.MEDIUM,
+@@ -686,6 +704,8 @@
+     for (const cop of colPairs) {
+       const cA = cop.a, cB = cop.b;
+       if (cA === undefined || cB === undefined) continue; // covered by Missing/Extra Column
++      // BUG FIX: suppress cell errors in structurally-defective columns
++      if (suppressedACols.has(cA) || suppressedBCols.has(cB)) continue;
+       const rawA = gridA[rA]?.[cA] ?? "";
+       const rawB = gridB[rB]?.[cB] ?? "";
+       const cellErr = classifyCell(name, rA, cA, rawA, rawB, rA < headerRows, shiftCells, cfg, strict);
+@@ -702,11 +722,15 @@
+       const nonEmpty = rowB.filter((v) => !isEmpty(v)).length;
+       if (nonEmpty === 0) continue;
+       compared += nonEmpty;
++      const missingRowExp = rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 200);
+       errors.push({
+         sheet: name, row: op.b, col: 0,
+         cellRef: `${colLetter(0)}${op.b + 1}`,
+-        expected: rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
++        expected: missingRowExp,
+         actual: "(row omitted)",
++        normalizedExpected: normalizeText(missingRowExp),
++        normalizedActual: "",
++        similarityPct: 0,
+         errorClass: "Missing Row",
+         severity: "CRITICAL",
+         penalty: SEVERITY_PENALTY.CRITICAL,
+@@ -720,11 +744,15 @@
+       const nonEmpty = rowA.filter((v) => !isEmpty(v)).length;
+       if (nonEmpty === 0) continue;
+       compared += nonEmpty;
++      const extraRowAct = rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 200);
+       errors.push({
+         sheet: name, row: op.a, col: 0,
+         cellRef: `${colLetter(0)}${op.a + 1}`,
+         expected: "(no such row)",
+-        actual: rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
++        actual: extraRowAct,
++        normalizedExpected: "",
++        normalizedActual: normalizeText(extraRowAct),
++        similarityPct: 0,
+         errorClass: "Extra Row",
+         severity: "CRITICAL",
+         penalty: SEVERITY_PENALTY.CRITICAL,
+@@ -743,6 +771,9 @@
+       cellRef: `${colLetter(0)}${headerRows + 1}`,
+       expected: `(${rowAlign.deletedRows} missing, ${rowAlign.insertedRows} extra)`,
+       actual: "row block shift",
++      normalizedExpected: "",
++      normalizedActual: "",
++      similarityPct: 0,
+       errorClass: "Row Shift",
+       severity: "CRITICAL",
+       penalty: SEVERITY_PENALTY.CRITICAL,
+@@ -763,6 +794,9 @@
+         sheet: name, row: 0, col: c,
+         cellRef: `${colLetter(c)}1`,
+         expected: `(${size} cells)`, actual: `column shift block`,
++        normalizedExpected: "",
++        normalizedActual: "",
++        similarityPct: 0,
+         errorClass: "Column Shift",
+         severity: "CRITICAL",
+         penalty: SEVERITY_PENALTY.CRITICAL,
+@@ -819,10 +853,15 @@
+   }
+ 
+   const penalty = isHeader ? cfg.headerPenalty : SEVERITY_PENALTY[rec.severity];
++  const normA = normalizeText(rawA);
++  const normB = normalizeText(rawB);
+   return {
+     sheet: name, row: r, col: c,
+     cellRef: `${colLetter(c)}${r + 1}`,
+     expected: String(rawB), actual: String(rawA),
++    normalizedExpected: normB,
++    normalizedActual: normA,
++    similarityPct: Math.round(similarity(normA, normB) * 100),
+     errorClass: rec.cls, severity: rec.severity, penalty,
+     isHeader, note: rec.note,
+   };
+@@ -851,6 +890,7 @@
+     copyPaste: Array<{ value: string; count: number }>;
+     clusters: Array<{ sheet: string; rowStart: number; rowEnd: number; count: number }>;
+     digitSwaps: Array<{ from: string; to: string; count: number }>;
++    sheetConcentration: Array<{ sheet: string; errorCount: number; pct: number }>;
+   };
+   metadata: {
+     fileAName: string;
+@@ -916,8 +956,8 @@
+     bySeverity.CRITICAL * 4 + (bySeverity.HIGH + bySeverity.HEADER) * 1 +
+     bySeverity.MEDIUM * 0.25 + bySeverity.LOW * 0.05;
+ 
+-  // Grade
+-  const grade = computeGrade(weightedAccuracy, bySeverity);
++  // Grade — spec: Weighted Accuracy disabled, grade uses baseAccuracy only
++  const grade = computeGrade(Math.max(0, baseAccuracy), bySeverity);
+ 
+   // Patterns
+   const patterns = detectPatterns(allErrors);
+@@ -1019,7 +1059,18 @@
+       return { from, to, count };
+     });
+ 
+-  return { copyPaste, clusters, digitSwaps };
++  // Sheet-level concentration (spec: Sheet-Level Concentration)
++  const totalErrs = errors.length;
++  const sheetConcentration = [...bySheet.entries()]
++    .map(([sheet, errs]) => ({
++      sheet,
++      errorCount: errs.length,
++      pct: totalErrs > 0 ? Math.round((errs.length / totalErrs) * 100) : 0,
++    }))
++    .filter((s) => s.pct >= 30 && s.errorCount >= 5) // only flag sheets with significant concentration
++    .sort((a, b) => b.pct - a.pct);
++
++  return { copyPaste, clusters, digitSwaps, sheetConcentration };
+ }
+ 
+ // ---------- Narrative + coaching ----------
