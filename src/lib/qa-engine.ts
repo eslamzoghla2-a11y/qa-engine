@@ -37,6 +37,9 @@ export interface ErrorRecord {
   cellRef: string;
   expected: string;
   actual: string;
+  normalizedExpected: string;   // spec: Normalized Reviewer
+  normalizedActual: string;     // spec: Normalized Employee
+  similarityPct: number;        // spec: Similarity %
   errorClass: ErrorClass;
   severity: Severity;
   penalty: number;
@@ -72,7 +75,7 @@ export const DEFAULT_CONFIG: QAConfig = {
   numericMajorVariance: 0.2,
   numericMajorAbsolute: 100,
   numericTolerance: 0.01,
-  numericToleranceMode: "PERCENTAGE",
+  numericToleranceMode: "ABSOLUTE",   // spec: ToleranceMode = ABSOLUTE
   minimumShiftCells: 20,
   shiftDetectionThreshold: 0.8,
   headerPenalty: 3,
@@ -94,12 +97,12 @@ const EASTERN_ARABIC = "٠١٢٣٤٥٦٧٨٩";
 const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
 
 export function normalizeArabic(s: string): string {
+  // NOTE: ة → ه is intentionally NOT normalized per spec (Literal Accuracy rule)
   return s
     .replace(/[أإآ]/g, "ا")
     .replace(/ى/g, "ي")
     .replace(/ؤ/g, "و")
     .replace(/ئ/g, "ي")
-    .replace(/ة/g, "ه")
     .replace(ARABIC_DIACRITICS, "");
 }
 
@@ -622,14 +625,21 @@ export function compareSheet(
   const errors: ErrorRecord[] = [];
 
   // Emit Missing Column / Extra Column events (once per column)
+  // Track suppressed employee columns so we don't emit cell errors inside them.
+  const suppressedACols = new Set<number>(); // extra cols in employee
+  const suppressedBCols = new Set<number>(); // missing cols (not in employee)
   if (useColAlign) {
     for (const op of colAlign.ops) {
       if (op.a === undefined && op.b !== undefined) {
+        suppressedBCols.add(op.b);
         errors.push({
           sheet: name, row: 0, col: op.b,
           cellRef: `${colLetter(op.b)}1`,
           expected: `(column ${colLetter(op.b)})`,
           actual: "(column omitted)",
+          normalizedExpected: `(column ${colLetter(op.b)})`,
+          normalizedActual: "",
+          similarityPct: 0,
           errorClass: "Missing Column",
           severity: "CRITICAL",
           penalty: SEVERITY_PENALTY.CRITICAL,
@@ -637,11 +647,15 @@ export function compareSheet(
           note: "Structural defect — entire column omitted. Downstream cell comparisons suppressed for this column.",
         });
       } else if (op.b === undefined && op.a !== undefined) {
+        suppressedACols.add(op.a);
         errors.push({
           sheet: name, row: 0, col: op.a,
           cellRef: `${colLetter(op.a)}1`,
           expected: "(no such column)",
           actual: `(column ${colLetter(op.a)})`,
+          normalizedExpected: "",
+          normalizedActual: `(column ${colLetter(op.a)})`,
+          similarityPct: 0,
           errorClass: "Extra Column",
           severity: "CRITICAL",
           penalty: SEVERITY_PENALTY.CRITICAL,
@@ -667,11 +681,15 @@ export function compareSheet(
         const cls: ErrorClass = local.kind === "missing" ? "Missing Cell"
                               : local.kind === "extra" ? "Extra Cell"
                               : "Local Row Misalignment";
+        const expStr = rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 160);
+        const actStr = rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 160);
         errors.push({
           sheet: name, row: rA, col: 0,
           cellRef: `${colLetter(0)}${rA + 1}`,
-          expected: rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 160),
-          actual: rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 160),
+          expected: expStr, actual: actStr,
+          normalizedExpected: normalizeText(expStr),
+          normalizedActual: normalizeText(actStr),
+          similarityPct: Math.round(similarity(normalizeText(actStr), normalizeText(expStr)) * 100),
           errorClass: cls,
           severity: "MEDIUM",
           penalty: SEVERITY_PENALTY.MEDIUM,
@@ -686,6 +704,8 @@ export function compareSheet(
     for (const cop of colPairs) {
       const cA = cop.a, cB = cop.b;
       if (cA === undefined || cB === undefined) continue; // covered by Missing/Extra Column
+      // BUG FIX: suppress cell errors in structurally-defective columns
+      if (suppressedACols.has(cA) || suppressedBCols.has(cB)) continue;
       const rawA = gridA[rA]?.[cA] ?? "";
       const rawB = gridB[rB]?.[cB] ?? "";
       const cellErr = classifyCell(name, rA, cA, rawA, rawB, rA < headerRows, shiftCells, cfg, strict);
@@ -702,11 +722,15 @@ export function compareSheet(
       const nonEmpty = rowB.filter((v) => !isEmpty(v)).length;
       if (nonEmpty === 0) continue;
       compared += nonEmpty;
+      const missingRowExp = rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 200);
       errors.push({
         sheet: name, row: op.b, col: 0,
         cellRef: `${colLetter(0)}${op.b + 1}`,
-        expected: rowB.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
+        expected: missingRowExp,
         actual: "(row omitted)",
+        normalizedExpected: normalizeText(missingRowExp),
+        normalizedActual: "",
+        similarityPct: 0,
         errorClass: "Missing Row",
         severity: "CRITICAL",
         penalty: SEVERITY_PENALTY.CRITICAL,
@@ -720,11 +744,15 @@ export function compareSheet(
       const nonEmpty = rowA.filter((v) => !isEmpty(v)).length;
       if (nonEmpty === 0) continue;
       compared += nonEmpty;
+      const extraRowAct = rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 200);
       errors.push({
         sheet: name, row: op.a, col: 0,
         cellRef: `${colLetter(0)}${op.a + 1}`,
         expected: "(no such row)",
-        actual: rowA.map((v) => String(v ?? "")).join(" | ").slice(0, 200),
+        actual: extraRowAct,
+        normalizedExpected: "",
+        normalizedActual: normalizeText(extraRowAct),
+        similarityPct: 0,
         errorClass: "Extra Row",
         severity: "CRITICAL",
         penalty: SEVERITY_PENALTY.CRITICAL,
@@ -743,6 +771,9 @@ export function compareSheet(
       cellRef: `${colLetter(0)}${headerRows + 1}`,
       expected: `(${rowAlign.deletedRows} missing, ${rowAlign.insertedRows} extra)`,
       actual: "row block shift",
+      normalizedExpected: "",
+      normalizedActual: "",
+      similarityPct: 0,
       errorClass: "Row Shift",
       severity: "CRITICAL",
       penalty: SEVERITY_PENALTY.CRITICAL,
@@ -763,6 +794,9 @@ export function compareSheet(
         sheet: name, row: 0, col: c,
         cellRef: `${colLetter(c)}1`,
         expected: `(${size} cells)`, actual: `column shift block`,
+        normalizedExpected: "",
+        normalizedActual: "",
+        similarityPct: 0,
         errorClass: "Column Shift",
         severity: "CRITICAL",
         penalty: SEVERITY_PENALTY.CRITICAL,
@@ -819,10 +853,15 @@ function classifyCell(
   }
 
   const penalty = isHeader ? cfg.headerPenalty : SEVERITY_PENALTY[rec.severity];
+  const normA = normalizeText(rawA);
+  const normB = normalizeText(rawB);
   return {
     sheet: name, row: r, col: c,
     cellRef: `${colLetter(c)}${r + 1}`,
     expected: String(rawB), actual: String(rawA),
+    normalizedExpected: normB,
+    normalizedActual: normA,
+    similarityPct: Math.round(similarity(normA, normB) * 100),
     errorClass: rec.cls, severity: rec.severity, penalty,
     isHeader, note: rec.note,
   };
@@ -851,6 +890,7 @@ export interface WorkbookReport {
     copyPaste: Array<{ value: string; count: number }>;
     clusters: Array<{ sheet: string; rowStart: number; rowEnd: number; count: number }>;
     digitSwaps: Array<{ from: string; to: string; count: number }>;
+    sheetConcentration: Array<{ sheet: string; errorCount: number; pct: number }>;
   };
   metadata: {
     fileAName: string;
@@ -916,8 +956,8 @@ export function compareWorkbooks(
     bySeverity.CRITICAL * 4 + (bySeverity.HIGH + bySeverity.HEADER) * 1 +
     bySeverity.MEDIUM * 0.25 + bySeverity.LOW * 0.05;
 
-  // Grade
-  const grade = computeGrade(weightedAccuracy, bySeverity);
+  // Grade — spec: Weighted Accuracy disabled, grade uses baseAccuracy only
+  const grade = computeGrade(Math.max(0, baseAccuracy), bySeverity);
 
   // Patterns
   const patterns = detectPatterns(allErrors);
@@ -1019,7 +1059,18 @@ function detectPatterns(errors: ErrorRecord[]): WorkbookReport["patterns"] {
       return { from, to, count };
     });
 
-  return { copyPaste, clusters, digitSwaps };
+  // Sheet-level concentration (spec: Sheet-Level Concentration)
+  const totalErrs = errors.length;
+  const sheetConcentration = [...bySheet.entries()]
+    .map(([sheet, errs]) => ({
+      sheet,
+      errorCount: errs.length,
+      pct: totalErrs > 0 ? Math.round((errs.length / totalErrs) * 100) : 0,
+    }))
+    .filter((s) => s.pct >= 30 && s.errorCount >= 5) // only flag sheets with significant concentration
+    .sort((a, b) => b.pct - a.pct);
+
+  return { copyPaste, clusters, digitSwaps, sheetConcentration };
 }
 
 // ---------- Narrative + coaching ----------
