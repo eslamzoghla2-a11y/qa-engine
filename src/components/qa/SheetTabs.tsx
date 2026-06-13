@@ -75,6 +75,29 @@ function SheetView({ sheet }: { sheet: SheetReport }) {
     return m;
   }, [sheet]);
 
+  // Grid Inspector metrics (spec)
+  const metrics = useMemo(() => {
+    const structural = ["Missing Row","Extra Row","Missing Column","Extra Column","Missing Cell","Extra Cell","Local Row Misalignment","Local Column Misalignment"];
+    const shiftTypes = ["Row Shift","Column Shift"];
+    const rangeTypes = ["Range Inversion","Range Boundary","Range Representation"];
+    const numericTypes = ["Missing Digit","Extra Digit","Digit Substitution","Digit Transposition","Numeric Difference"];
+    const textTypes = ["Text Typo","Major Text Difference","Minor Variation"];
+    const headerTypes = ["Header Mismatch"];
+    let structuralCount = 0, shiftCount = 0, rangeCount = 0, numericCount = 0, textCount = 0, headerCount = 0;
+    for (const e of sheet.errors) {
+      if (structural.includes(e.errorClass)) structuralCount++;
+      else if (shiftTypes.includes(e.errorClass)) shiftCount++;
+      else if (rangeTypes.includes(e.errorClass)) rangeCount++;
+      else if (numericTypes.includes(e.errorClass)) numericCount++;
+      else if (textTypes.includes(e.errorClass)) textCount++;
+      else if (headerTypes.includes(e.errorClass)) headerCount++;
+    }
+    const accuracy = sheet.comparedCells
+      ? ((sheet.comparedCells - sheet.errors.length) / sheet.comparedCells * 100).toFixed(1)
+      : "100.0";
+    return { structuralCount, shiftCount, rangeCount, numericCount, textCount, headerCount, accuracy };
+  }, [sheet]);
+
   const totalRows = Math.max(sheet.gridA.length, sheet.gridB.length);
   const totalCols = sheet.colCount;
   const rows = Math.min(totalRows, MAX_ROWS);
@@ -89,7 +112,7 @@ function SheetView({ sheet }: { sheet: SheetReport }) {
           <div className="font-semibold text-sm">{sheet.name}</div>
           <span className="text-muted-foreground">·</span>
           <span className="text-muted-foreground tabular-nums">
-            {sheet.comparedCells.toLocaleString()} cells · {sheet.errors.length} defects · {sheet.shiftCells.size} shift cells
+            {sheet.comparedCells.toLocaleString()} cells · {sheet.errors.length} defects · {metrics.accuracy}% accuracy
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -106,6 +129,24 @@ function SheetView({ sheet }: { sheet: SheetReport }) {
           <Legend />
         </div>
       </div>
+
+      {/* Grid Inspector breakdown (spec) */}
+      <div className="grid grid-cols-3 md:grid-cols-6 gap-px bg-border border-b border-border text-[10px]">
+        {[
+          { label: "Structural", value: metrics.structuralCount, tone: metrics.structuralCount > 0 ? "text-critical" : "text-muted-foreground" },
+          { label: "Shift", value: metrics.shiftCount, tone: metrics.shiftCount > 0 ? "text-critical" : "text-muted-foreground" },
+          { label: "Range", value: metrics.rangeCount, tone: metrics.rangeCount > 0 ? "text-high" : "text-muted-foreground" },
+          { label: "Numeric", value: metrics.numericCount, tone: metrics.numericCount > 0 ? "text-medium" : "text-muted-foreground" },
+          { label: "Text", value: metrics.textCount, tone: metrics.textCount > 0 ? "text-medium" : "text-muted-foreground" },
+          { label: "Header", value: metrics.headerCount, tone: metrics.headerCount > 0 ? "text-info" : "text-muted-foreground" },
+        ].map((m) => (
+          <div key={m.label} className="bg-surface-2 px-3 py-2 flex items-center justify-between">
+            <span className="text-muted-foreground uppercase tracking-wider font-medium">{m.label}</span>
+            <span className={`font-semibold tabular-nums ${m.tone}`}>{m.value}</span>
+          </div>
+        ))}
+      </div>
+
       {cropped && (
         <div className="flex items-center gap-2 px-4 py-2 bg-medium/10 border-b border-medium/20 text-xs text-medium">
           <Eye className="h-3.5 w-3.5" />
@@ -169,6 +210,13 @@ function Cell({ err, isShift, isHeader, value }: { err?: ErrorRecord; isShift: b
           <div className="space-y-0.5 font-mono">
             <div><span className="text-muted-foreground">Expected:</span> {err.expected || "∅"}</div>
             <div><span className="text-muted-foreground">Actual:</span> {err.actual || "∅"}</div>
+            {err.normalizedExpected !== err.expected && (
+              <div><span className="text-muted-foreground">Norm. Expected:</span> {err.normalizedExpected || "∅"}</div>
+            )}
+            {err.normalizedActual !== err.actual && (
+              <div><span className="text-muted-foreground">Norm. Actual:</span> {err.normalizedActual || "∅"}</div>
+            )}
+            <div><span className="text-muted-foreground">Similarity:</span> {err.similarityPct ?? "—"}%</div>
             <div><span className="text-muted-foreground">Penalty:</span> {err.penalty}</div>
           </div>
           {err.note && <div className="text-medium mt-1.5">{err.note}</div>}
