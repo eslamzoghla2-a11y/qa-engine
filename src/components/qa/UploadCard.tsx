@@ -68,6 +68,7 @@ export function UploadCard() {
   const [fileA, setFileA] = useState<File | null>(null);
   const [fileB, setFileB] = useState<File | null>(null);
   const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
 
   async function run() {
     if (!fileA || !fileB) {
@@ -75,11 +76,14 @@ export function UploadCard() {
       return;
     }
     setRunning(true);
+    setProgress("Reading files…");
     try {
       const [bufA, bufB] = await Promise.all([fileA.arrayBuffer(), fileB.arrayBuffer()]);
+      setProgress("Parsing workbooks…");
+      await new Promise((r) => setTimeout(r, 10));
       const wbA = loadWorkbook(bufA);
       const wbB = loadWorkbook(bufB);
-      // Yield to keep UI responsive
+      setProgress(`Comparing ${wbA.SheetNames.length} sheet(s)…`);
       await new Promise((r) => setTimeout(r, 20));
       const report = compareWorkbooks(
         { name: fileA.name, wb: wbA },
@@ -94,6 +98,7 @@ export function UploadCard() {
       toast.error("Failed to parse workbook. Ensure both are valid Excel files.");
     } finally {
       setRunning(false);
+      setProgress(null);
     }
   }
 
@@ -122,9 +127,18 @@ export function UploadCard() {
               file={fileB} onPick={setFileB} />
       </div>
       <Button onClick={run} disabled={running || !fileA || !fileB} className="w-full mt-5">
-        {running ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Evaluating…</>
-                 : <><Sparkles className="h-4 w-4 mr-2" /> Run Quality Assurance</>}
+        {running
+          ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />{progress ?? "Evaluating…"}</>
+          : <><Sparkles className="h-4 w-4 mr-2" /> Run Quality Assurance</>}
       </Button>
+      {running && (
+        <div className="mt-3">
+          <div className="h-1 w-full bg-border rounded-full overflow-hidden">
+            <div className="h-1 bg-primary rounded-full animate-pulse w-1/2" />
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-1.5 text-center">{progress}</p>
+        </div>
+      )}
     </div>
   );
 }
